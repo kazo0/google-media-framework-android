@@ -61,6 +61,11 @@ public class SimpleVideoPlayer {
    */
   private final VideoSurfaceLayer videoSurfaceLayer;
 
+  private final LoadingLayer loadingLayer;
+
+  private final ErrorLayer errorLayer;
+
+  private boolean isError = false;
   /**
    * Set whether the video should play immediately.
    */
@@ -72,13 +77,16 @@ public class SimpleVideoPlayer {
    * @param video The video that should be played.
    * @param videoTitle The title of the video (displayed on the left of the top chrome).
    * @param autoplay Whether the video should start playing immediately.
+   * @param showControls Whether the playback control layer should display the controls.
    */
   public SimpleVideoPlayer(Activity activity,
                            FrameLayout container,
                            Video video,
                            String videoTitle,
-                           boolean autoplay) {
-    this(activity, container, video, videoTitle, autoplay, 0, null);
+                           boolean autoplay,
+                           boolean showControls,
+                           boolean forceLandscapeOnFullscreen) {
+    this(activity, container, video, videoTitle, autoplay, showControls, forceLandscapeOnFullscreen, 0, null, null);
   }
 
   /**
@@ -87,6 +95,7 @@ public class SimpleVideoPlayer {
    * @param video The video that should be played.
    * @param videoTitle The title of the video (displayed on the left of the top chrome).
    * @param autoplay Whether the video should start playing immediately.
+   * @param showControls Whether the playback control layer should display the controls.
    * @param fullscreenCallback The callback which gets triggered when the player enters or leaves
    *                           fullscreen mode.
    */
@@ -95,25 +104,31 @@ public class SimpleVideoPlayer {
                            Video video,
                            String videoTitle,
                            boolean autoplay,
+                           boolean showControls,
+                           boolean forceLandscapeOnFullscreen,
                            int startPostitionMs,
-                           PlaybackControlLayer.FullscreenCallback fullscreenCallback) {
+                           PlaybackControlLayer.FullscreenCallback fullscreenCallback,
+                           PlaybackControlLayer.ControlsLayerCallback controlsLayerCallback) {
     this.activity = activity;
 
-    playbackControlLayer = new PlaybackControlLayer(videoTitle, fullscreenCallback);
+    playbackControlLayer = new PlaybackControlLayer(videoTitle, fullscreenCallback, controlsLayerCallback, showControls, forceLandscapeOnFullscreen);
     subtitleLayer = new SubtitleLayer();
     videoSurfaceLayer = new VideoSurfaceLayer(autoplay);
+    loadingLayer = new LoadingLayer();
+    errorLayer = new ErrorLayer();
     this.autoplay = autoplay;
 
     List<Layer> layers = new ArrayList<Layer>();
     layers.add(videoSurfaceLayer);
     layers.add(playbackControlLayer);
     layers.add(subtitleLayer);
+    layers.add(loadingLayer);
+    layers.add(errorLayer);
 
     layerManager = new LayerManager(activity,
         container,
         video,
         layers);
-
     layerManager.getExoplayerWrapper().setTextListener(subtitleLayer);
 
     if (startPostitionMs > 0) {
@@ -181,9 +196,26 @@ public class SimpleVideoPlayer {
    * container.
    */
   public void hide() {
-    videoSurfaceLayer.hide();
     playbackControlLayer.hide();
     subtitleLayer.setVisibility(View.GONE);
+  }
+
+  public void showError() {
+    hide();
+    loadingLayer.setVisibility(View.INVISIBLE);
+    errorLayer.setVisibility(View.VISIBLE);
+    playbackControlLayer.showError();
+  }
+
+  public void setIsLoading(boolean isLoading) {
+    playbackControlLayer.setPlaybackControlButtonVisibility(isLoading ? View.INVISIBLE : View.VISIBLE);
+    loadingLayer.setVisibility(isLoading ? View.VISIBLE : View.INVISIBLE);
+  }
+
+  public void setLoadingColor(int color) {
+    if (loadingLayer != null) {
+      loadingLayer.setLoadingColor(color);
+    }
   }
 
   /**
@@ -198,6 +230,10 @@ public class SimpleVideoPlayer {
    */
   public boolean isFullscreen() {
     return playbackControlLayer.isFullscreen();
+  }
+
+  public void setIsFullscreenToggleVisible(boolean shouldShowFullscreen) {
+    playbackControlLayer.setIsFullscreenToggleVisible(shouldShowFullscreen);
   }
 
   /**
@@ -249,6 +285,11 @@ public class SimpleVideoPlayer {
     layerManager.getControl().start();
   }
 
+  public void replay() {
+    layerManager.getExoplayerWrapper().seekTo(0);
+    play();
+  }
+
   /**
    * Sets the color of the top chrome, bottom chrome, and background.
    * @param color a color derived from the @{link Color} class
@@ -266,6 +307,14 @@ public class SimpleVideoPlayer {
    */
   public void setFullscreenCallback(PlaybackControlLayer.FullscreenCallback fullscreenCallback) {
     playbackControlLayer.setFullscreenCallback(fullscreenCallback);
+  }
+
+  /**
+   * Set the callback which will be called when the player's controls are shown/hidden
+   * @param controlsLayerCallback
+   */
+  public void setControlsLayerCallback(PlaybackControlLayer.ControlsLayerCallback controlsLayerCallback) {
+    playbackControlLayer.setControlsLayerCallback(controlsLayerCallback);
   }
 
   /**
@@ -333,9 +382,8 @@ public class SimpleVideoPlayer {
    * the screen.
    */
   public void show() {
-    videoSurfaceLayer.show();
-    playbackControlLayer.show();
-    subtitleLayer.setVisibility(View.VISIBLE);
+      playbackControlLayer.show();
+      subtitleLayer.setVisibility(View.VISIBLE);
   }
 
   /**
@@ -344,6 +392,12 @@ public class SimpleVideoPlayer {
   public void showTopChrome() {
     playbackControlLayer.showTopChrome();
   }
+
+  /**
+   * Sets whether the player controls will be hidden or not
+   * @param isHidden Whether or not the playback controls should be forcibly hidden.
+   */
+  public void setControlsHidden(boolean isHidden) { playbackControlLayer.setForceHidden(isHidden); }
 
   /**
    * When you are finished using this {@link SimpleVideoPlayer}, make sure to call this method.

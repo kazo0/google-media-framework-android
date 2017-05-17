@@ -30,6 +30,7 @@ import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
@@ -38,8 +39,10 @@ import android.widget.RelativeLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import com.google.android.exoplayer.ExoPlayer;
 import com.google.android.exoplayer.util.PlayerControl;
 import com.google.android.libraries.mediaframework.R;
+import com.google.android.libraries.mediaframework.exoplayerextensions.ExoplayerWrapper;
 import com.google.android.libraries.mediaframework.exoplayerextensions.PlayerControlCallback;
 
 import java.lang.ref.WeakReference;
@@ -86,8 +89,7 @@ import java.util.Locale;
  *
  * <p>The view is defined in the layout file: res/layout/playback_control_layer.xml.
  */
-public class PlaybackControlLayer implements Layer, PlayerControlCallback {
-
+public class PlaybackControlLayer implements Layer, PlayerControlCallback, ExoplayerWrapper.PlaybackListener {
   /**
    * In order to imbue the {@link PlaybackControlLayer} with the ability make the player fullscreen,
    * a {@link PlaybackControlLayer.FullscreenCallback} must be assigned to it. The
@@ -107,6 +109,19 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
      * went to fullscreen.
      */
     public void onReturnFromFullscreen();
+  }
+
+  /**
+   * The {@link PlaybackControlLayer.ControlsLayerCallback} implementation will be called when the
+   * controls layer (seekbar, play button, etc.) are being hidden/shown
+   */
+  public interface ControlsLayerCallback {
+
+    public void onControlsHiding();
+
+    public void onControlsHidden();
+
+    public void onControlsShown();
   }
 
   /**
@@ -151,7 +166,9 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
       int pos;
       switch (msg.what) {
         case FADE_OUT:
-          layer.hide();
+          if (layer.playbackState != ExoPlayer.STATE_ENDED) {
+            layer.hide();
+          }
           break;
         case SHOW_PROGRESS:
           pos = layer.updateProgress();
@@ -203,6 +220,26 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
   private static final int SHOW_PROGRESS = 2;
 
   /**
+   * State indicating the playbackControlButton is showing the PLAY icon
+   */
+  private static final int PLAY = 0;
+
+  /**
+   * State indicating the playbackControlButton is showing the PAUSE icon
+   */
+  private static final int PAUSE = 1;
+
+  /**
+   * State indicating the playbackControlButton is showing the REPLAY icon
+   */
+  private static final int REPLAY = 2;
+
+  /**
+   * Current state of the playbackControlButton (PLAY, PAUSE, REPLAY)
+   */
+  private int currentPlaybackControl;
+
+  /**
    * List of image buttons which are displayed in the right side of the top chrome.
    */
   private List<ImageButton> actionButtons;
@@ -211,6 +248,11 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    * Whether the playback control layer is visible.
    */
   private boolean isVisible;
+
+  /**
+   * Whether the playback control layer should forcibly be hidden.
+   */
+  private boolean forceHidden;
 
   /**
    * Whether the playback control layer is currently in the process of fading out.
@@ -222,6 +264,27 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    */
   private boolean canSeek;
 
+  /**
+   * Current playback state of ExoPlayer
+   */
+  private int playbackState;
+
+  /**
+   * A flag to indicate whether the app will be forced into Landscape
+   * when the video player enters fullscreen mode.
+   */
+  private boolean forceLandscapeOnFullscreen;
+
+  /**
+   * The System UI Flags that are used to enter into a fullscreen immersive mode
+   */
+  private final int fullscreenUiFlags =
+          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                  | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                  | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                  | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                  | View.SYSTEM_UI_FLAG_FULLSCREEN
+                  | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
   /**
    * <p> Derived from the Color class (ex. {@link Color#RED}), the chrome consists of three
    * views, which are are tinted with the the chrome color.
@@ -278,6 +341,8 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    */
   private FullscreenCallback fullscreenCallback;
 
+  private ControlsLayerCallback controlsLayerCallback;
+
   private PlayCallback playCallback;
   /**
    * The message handler which deals with displaying progress and fading out the media controls
@@ -289,6 +354,10 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    * Whether the player is currently in fullscreen mode.
    */
   private boolean isFullscreen;
+
+  private boolean showFullscreenToggle;
+
+  private int originalOrientation;
 
   /**
    * Whether the seekbar is currently being dragged.
@@ -326,7 +395,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
   /**
    * Displays the play icon when the video is playing, or the pause icon when the video is playing.
    */
-  private ImageButton pausePlayButton;
+  private ImageButton playbackControlButton;
 
   /**
    * Displays a track and a thumb which can be used to seek to different time points in the video.
@@ -385,21 +454,18 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    */
   private FrameLayout view;
 
-  /**
-   * Saved orientation for coming back from fullscreen.
-   */
-  private int savedOrientation;
-
   public PlaybackControlLayer(String videoTitle) {
-    this(videoTitle, null);
+    this(videoTitle, null, null, true, false);
   }
-
-  public PlaybackControlLayer(String videoTitle, FullscreenCallback fullscreenCallback) {
+  public PlaybackControlLayer(String videoTitle, FullscreenCallback fullscreenCallback, ControlsLayerCallback controlsLayerCallback, boolean showControls, boolean forceLandscapeOnFullscreen) {
     this.videoTitle = videoTitle;
     this.canSeek = true;
     this.fullscreenCallback = fullscreenCallback;
+    this.controlsLayerCallback = controlsLayerCallback;
     this.shouldBePlaying = false;
     actionButtons = new ArrayList<ImageButton>();
+    this.forceHidden = !showControls;
+    this.forceLandscapeOnFullscreen = forceLandscapeOnFullscreen;
   }
 
   /**
@@ -457,8 +523,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
         .getLayoutParams();
 
     layerManager.getControl().addCallback(this);
-
-    savedOrientation = layerManager.getActivity().getResources().getConfiguration().orientation;
+    layerManager.getExoplayerWrapper().addListener(this);
 
     textColor = DEFAULT_TEXT_COLOR;
     chromeColor = DEFAULT_CHROME_COLOR;
@@ -511,11 +576,6 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    * hidden (or made visible) when this method is called.
    */
   public void doToggleFullscreen() {
-
-    // If there is no callback for handling fullscreen, don't do anything.
-    if (fullscreenCallback == null) {
-      return;
-    }
     PlayerControl playerControl = getLayerManager().getControl();
     if (playerControl == null) {
       return;
@@ -523,13 +583,17 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
 
     Activity activity = getLayerManager().getActivity();
     FrameLayout container = getLayerManager().getContainer();
+    final View decorView = activity.getWindow().getDecorView();
 
     if (isFullscreen) {
-      fullscreenCallback.onReturnFromFullscreen();
-      activity.setRequestedOrientation(savedOrientation);
+      if (fullscreenCallback != null) {
+        fullscreenCallback.onReturnFromFullscreen();
+      }
 
-      // Make the status bar and navigation bar visible again.
+      // Make the status bar and navigation bar visible again, no longer force the screen to stay on.
+      decorView.setOnSystemUiVisibilityChangeListener(null);
       activity.getWindow().getDecorView().setSystemUiVisibility(0);
+      activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
       container.setLayoutParams(originalContainerLayoutParams);
 
@@ -537,33 +601,35 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
 
       isFullscreen = false;
     } else {
-      fullscreenCallback.onGoToFullscreen();
-      savedOrientation = activity.getResources().getConfiguration().orientation;
-      activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
-
-      activity.getWindow().getDecorView().setSystemUiVisibility(
-          View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN);
+      if (fullscreenCallback != null) {
+        fullscreenCallback.onGoToFullscreen();
+      }
+      if (forceLandscapeOnFullscreen) {
+        activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+      }
+      //Ensure the activity is not currently forcing the window into not fullscreen
+      activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+      activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+      decorView.setSystemUiVisibility(fullscreenUiFlags);
 
       // Whenever the status bar and navigation bar appear, we want the playback controls to
       // appear as well.
-      activity.getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(
-          new View.OnSystemUiVisibilityChangeListener() {
-            @Override
-            public void onSystemUiVisibilityChange(int i) {
-              // By doing a logical AND, we check if the fullscreen option is triggered (i.e. the
-              // status bar is hidden). If the result of the logical AND is 0, that means that the
-              // fullscreen flag is NOT triggered. This means that the status bar is showing. If
-              // this is the case, then we show the playback controls as well (by calling show()).
-              if ((i & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
-                show();
+      decorView.setOnSystemUiVisibilityChangeListener(
+              new View.OnSystemUiVisibilityChangeListener() {
+                @Override
+                public void onSystemUiVisibilityChange(int i) {
+                  //This check will allow us to put back the fullscreen flags if the status bar has
+                  //reappeared due to a navigation (such as navigating to and from the ad website)
+                  if ((i & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
+                    show();
+                  }
+                }
               }
-            }
-          }
       );
 
       container.setLayoutParams(Util.getLayoutParamsBasedOnParent(container,
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.MATCH_PARENT));
+              ViewGroup.LayoutParams.MATCH_PARENT,
+              ViewGroup.LayoutParams.MATCH_PARENT));
 
       fullscreenButton.setImageResource(R.drawable.ic_action_return_from_full_screen);
 
@@ -609,10 +675,17 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
           .setDuration(FADE_OUT_DURATION_MS)
           .setListener(new Animator.AnimatorListener() {
             @Override
-            public void onAnimationStart(Animator animation) {}
+            public void onAnimationStart(Animator animation) {
+              if (controlsLayerCallback != null) {
+                controlsLayerCallback.onControlsHiding();
+              }
+            }
 
             @Override
             public void onAnimationEnd(Animator animation) {
+              if (controlsLayerCallback != null) {
+                controlsLayerCallback.onControlsHidden();
+              }
               isFadingOut = false;
               playbackControlRootView.setVisibility(View.INVISIBLE);
               container.removeView(view);
@@ -620,18 +693,21 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
               // Make sure that the status bar and navigation bar are hidden when the playback
               // controls are hidden.
               if (isFullscreen) {
-                getLayerManager().getActivity().getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN);
+                getLayerManager().getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+                getLayerManager().getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                getLayerManager().getActivity().getWindow().getDecorView().setSystemUiVisibility(fullscreenUiFlags);
               }
               handler.removeMessages(SHOW_PROGRESS);
               isVisible = false;
             }
 
             @Override
-            public void onAnimationCancel(Animator animation) {}
+            public void onAnimationCancel(Animator animation) {
+            }
 
             @Override
-            public void onAnimationRepeat(Animator animation) {}
+            public void onAnimationRepeat(Animator animation) {
+            }
           });
     }
   }
@@ -643,10 +719,13 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    *                controls will not disappear unless their container is tapped again.
    */
   public void show(int timeout) {
-    if (!isVisible && getLayerManager().getContainer() != null) {
+    if (!isVisible && getLayerManager().getContainer() != null && !forceHidden) {
       playbackControlRootView.setAlpha(1.0f);
       // Make the view visible.
       playbackControlRootView.setVisibility(View.VISIBLE);
+      if (controlsLayerCallback != null) {
+        controlsLayerCallback.onControlsShown();
+      }
 
       updateProgress();
 
@@ -661,7 +740,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
       setupView();
       isVisible = true;
     }
-    updatePlayPauseButton();
+    updatePlaybackControlButton();
 
     handler.sendEmptyMessage(SHOW_PROGRESS);
 
@@ -670,6 +749,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
     if (timeout > 0) {
       handler.sendMessageDelayed(msg, timeout);
     }
+
   }
 
   /**
@@ -714,6 +794,13 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
     }
   }
 
+  public void setIsFullscreenToggleVisible(boolean shouldShowFullscreen) {
+    this.showFullscreenToggle = shouldShowFullscreen;
+    if (this.showFullscreenToggle && fullscreenButton != null) {
+      fullscreenButton.setVisibility(View.GONE);
+    }
+  }
+
   @Override
   public void onLayerDisplayed(LayerManager layerManager) {}
 
@@ -722,7 +809,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    */
   @Override
   public void onPause() {
-    updatePlayPauseButton();
+    updatePlaybackControlButton();
   }
 
   /**
@@ -730,7 +817,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    */
   @Override
   public void onPlay() {
-    updatePlayPauseButton();
+    updatePlaybackControlButton();
     if (playCallback != null) {
       playCallback.onPlay();
     }
@@ -789,11 +876,17 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    */
   public void setFullscreenCallback(FullscreenCallback fullscreenCallback) {
     this.fullscreenCallback = fullscreenCallback;
-    if (fullscreenButton != null && fullscreenCallback != null) {
-      fullscreenButton.setVisibility(View.VISIBLE);
-    } else if (fullscreenButton != null && fullscreenCallback == null) {
-      fullscreenButton.setVisibility(View.INVISIBLE);
+    if (fullscreenButton != null) {
+      fullscreenButton.setVisibility(showFullscreenToggle ? View.VISIBLE : View.GONE);
     }
+  }
+
+  /**
+   * Set the callback which will be called when the player's controls are shown/hidden.
+   * @param controlsLayerCallback
+   */
+  public void setControlsLayerCallback(ControlsLayerCallback controlsLayerCallback) {
+    this.controlsLayerCallback = controlsLayerCallback;
   }
 
   /**
@@ -808,22 +901,27 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
   }
 
   /**
-   * Play or pause the player.
-   * @param shouldPlay If true, then the player starts playing. If false, the player pauses.
+   * Play, pause, or replay the player.
    */
-  public void setPlayPause(boolean shouldPlay) {
+  public void setPlaybackControl() {
     PlayerControl playerControl = getLayerManager().getControl();
     if (playerControl == null) {
       return;
     }
 
-    if (shouldPlay) {
-      playerControl.start();
-    } else {
-      playerControl.pause();
+    switch (currentPlaybackControl) {
+      case PLAY:
+        playerControl.start();
+        break;
+      case PAUSE:
+        playerControl.pause();
+        break;
+      case REPLAY:
+        playerControl.seekTo(0);
+        playerControl.start();
+        break;
     }
-
-    updatePlayPauseButton();
+    updatePlaybackControlButton();
   }
 
   /**
@@ -842,7 +940,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    */
   private void setupView() {
     // Bind fields to UI elements.
-    pausePlayButton = (ImageButton) view.findViewById(R.id.pause);
+    playbackControlButton = (ImageButton) view.findViewById(R.id.pause);
     fullscreenButton = (ImageButton) view.findViewById((R.id.fullscreen));
     seekBar = (SeekBar) view.findViewById(R.id.mediacontroller_progress);
     videoTitleView = (TextView) view.findViewById(R.id.video_title);
@@ -854,17 +952,17 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
     bottomChrome = (LinearLayout) view.findViewById(R.id.bottom_chrome);
     actionButtonsContainer = (LinearLayout) view.findViewById(R.id.actions_container);
 
-    // The play button should toggle play/pause when the play/pause button is clicked.
-    pausePlayButton.setOnClickListener(new View.OnClickListener() {
+    // The button should toggle play/pause/replay when the button is clicked.
+    playbackControlButton.setOnClickListener(new View.OnClickListener() {
       @Override
       public void onClick(View view) {
-        togglePlayPause();
+        setPlaybackControl();
         show(DEFAULT_TIMEOUT_MS);
       }
     });
 
-    if (fullscreenCallback == null) {
-      fullscreenButton.setVisibility(View.INVISIBLE);
+    if (!showFullscreenToggle) {
+      fullscreenButton.setVisibility(View.GONE);
     }
     // Go into fullscreen when the fullscreen button is clicked.
     fullscreenButton.setOnClickListener(new View.OnClickListener() {
@@ -908,7 +1006,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
       public void onStopTrackingTouch(SeekBar seekBar) {
         isSeekbarDragging = false;
         updateProgress();
-        updatePlayPauseButton();
+        updatePlaybackControlButton();
         show(DEFAULT_TIMEOUT_MS);
 
         handler.sendEmptyMessage(SHOW_PROGRESS);
@@ -947,14 +1045,6 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
     } else {
       return timeFormatter.format("%02d:%02d", minutes, seconds).toString();
     }
-  }
-
-  /**
-   * If the player is paused, play it and if the player is playing, pause it.
-   */
-  public void togglePlayPause() {
-    this.shouldBePlaying = !getLayerManager().getControl().isPlaying();
-    setPlayPause(shouldBePlaying);
   }
 
   /**
@@ -1029,7 +1119,7 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
     videoTitleView.setTextColor(textColor);
 
     fullscreenButton.setColorFilter(controlColor);
-    pausePlayButton.setColorFilter(controlColor);
+    playbackControlButton.setColorFilter(controlColor);
     seekBar.getProgressDrawable().setColorFilter(seekbarColor, PorterDuff.Mode.SRC_ATOP);
     seekBar.getThumb().setColorFilter(seekbarColor, PorterDuff.Mode.SRC_ATOP);
 
@@ -1052,16 +1142,32 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
    * Change the icon of the play/pause button to indicate play or pause based on the state of the
    * video player.
    */
-  public void updatePlayPauseButton() {
+  public void updatePlaybackControlButton() {
     PlayerControl playerControl = getLayerManager().getControl();
-    if (view == null || pausePlayButton == null || playerControl == null) {
+    if (view == null || playbackControlButton == null || playerControl == null) {
       return;
     }
 
-    if (playerControl.isPlaying()) {
-      pausePlayButton.setImageResource(R.drawable.ic_action_pause_large);
+    if (playbackState == ExoPlayer.STATE_ENDED) {
+      playbackControlButton.setImageResource(R.drawable.ic_action_replay_large);
+      currentPlaybackControl = REPLAY;
+    } else if (playerControl.isPlaying()) {
+      playbackControlButton.setImageResource(R.drawable.ic_action_pause_large);
+      currentPlaybackControl = PAUSE;
     } else {
-      pausePlayButton.setImageResource(R.drawable.ic_action_play_large);
+      playbackControlButton.setImageResource(R.drawable.ic_action_play_large);
+      currentPlaybackControl = PLAY;
+    }
+  }
+
+  /**
+   * Sets whether the player controls will be hidden or not
+   * @param isHidden Whether or not the playback controls should be forcibly hidden.
+   */
+  public void setForceHidden(boolean isHidden) {
+    this.forceHidden = isHidden;
+    if (this.forceHidden) {
+      hide();
     }
   }
 
@@ -1097,10 +1203,42 @@ public class PlaybackControlLayer implements Layer, PlayerControlCallback {
     return position;
   }
 
+  public void setPlaybackControlButtonVisibility(int visibility) {
+    if (playbackControlButton != null) {
+      playbackControlButton.setVisibility(visibility);
+    }
+  }
+
+  @Override
+  public void onStateChanged(boolean playWhenReady, int playbackState) {
+    this.playbackState = playbackState;
+    if (playbackState == ExoPlayer.STATE_ENDED) {
+      handler.removeMessages(FADE_OUT);
+      show();
+    } else {
+      updatePlaybackControlButton();
+    }
+  }
+
+  @Override
+  public void onError(Exception e) {
+    //Do nothing
+  }
+
+  @Override
+  public void onVideoSizeChanged(int width, int height, int unappliedRotationDegrees, float pixelWidthHeightRatio) {
+    //Do nothing
+  }
+
   /**
    * Set play callback
    */
   public void setPlayCallback(PlayCallback playCallback) {
     this.playCallback = playCallback;
+  }
+
+  public void showError()
+  {
+    getLayerManager().getContainer().setOnClickListener(null);
   }
 }

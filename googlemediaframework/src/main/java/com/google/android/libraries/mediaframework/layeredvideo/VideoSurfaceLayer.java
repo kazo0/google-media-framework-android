@@ -18,7 +18,6 @@ package com.google.android.libraries.mediaframework.layeredvideo;
 
 import android.view.LayoutInflater;
 import android.view.SurfaceHolder;
-import android.view.View;
 import android.widget.FrameLayout;
 
 import com.google.android.libraries.mediaframework.R;
@@ -35,7 +34,7 @@ public class VideoSurfaceLayer implements Layer {
   private boolean autoplay;
 
   /**
-   * The {@link LayerManager} whcih is responsible for creating this layer's view and adding it to
+   * The {@link LayerManager} which is responsible for creating this layer's view and adding it to
    * the video player.
    */
   private LayerManager layerManager;
@@ -75,6 +74,7 @@ public class VideoSurfaceLayer implements Layer {
         if (wrapper.getSurface().isValid() ||
             wrapper.getStateForTrackType(ExoplayerWrapper.TYPE_VIDEO)
                 == ExoplayerWrapper.DISABLED_TRACK) {
+          wrapper.prepare();
           wrapper.setPlayWhenReady(autoplay);
         }
       }
@@ -168,13 +168,5 @@ public class VideoSurfaceLayer implements Layer {
     if (wrapper != null) {
       wrapper.removeListener(playbackListener);
     }
-  }
-
-  public void hide() {
-    surfaceView.setVisibility(View.INVISIBLE);
-  }
-
-  public void show() {
-    surfaceView.setVisibility(View.VISIBLE);
   }
 }

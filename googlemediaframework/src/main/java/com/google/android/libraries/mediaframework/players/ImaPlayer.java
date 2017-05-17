@@ -11,7 +11,7 @@
  limitations under the License.
  */
 
-package com.google.googlemediaframeworkdemo.demo.adplayer;
+package com.google.android.libraries.mediaframework.players;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -545,7 +545,7 @@ public class ImaPlayer {
 
                     @Override
                     public void onActivityResumed(Activity activity) {
-                        resume();
+                        //Do nothing.
                     }
 
                     @Override
@@ -1031,7 +1031,7 @@ public class ImaPlayer {
             return this;
         }
 
-        public Builder setForceLandscapeOnFullscreen(boolean forceLandscapeOnFullscreen) {
+        public Builder forceLandscapeOnFullscreen(boolean forceLandscapeOnFullscreen) {
             this.forceLandscapeOnFullscreen = forceLandscapeOnFullscreen;
             return this;
         }
